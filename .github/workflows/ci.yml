@@ -1,0 +1,555 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+env:
+  IMAGE_NAME: openldap:ci
+  CONTAINER_NAME: test-ldap
+  DOCKERFILE_PATH: ./image
+
+jobs:
+  build:
+    name: Build Image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        working-directory: ${{ env.DOCKERFILE_PATH }}
+        run: docker build -t ${{ env.IMAGE_NAME }} .
+
+      - name: Save image artifact
+        run: docker save ${{ env.IMAGE_NAME }} | gzip > image.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: image.tar.gz
+          retention-days: 1
+
+  test-basic:
+    name: Basic Smoke Test
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+
+      - name: Load Docker image
+        run: docker load < image.tar.gz
+
+      - name: Start container
+        run: |
+          docker run -d --name ${{ env.CONTAINER_NAME }} \
+            -e LDAP_DOMAIN=example.com \
+            -e LDAP_ORGANIZATION="Test Org" \
+            -e LDAP_ADMIN_PASSWORD=admin123 \
+            -e LDAP_ENABLE_MEMBEROF=true \
+            -e LDAP_READONLY_USER=true \
+            -e LDAP_READONLY_USER_PASSWORD=readonly123 \
+            --health-cmd='/usr/local/bin/healthcheck.sh' \
+            --health-interval=2s \
+            --health-timeout=5s \
+            --health-retries=30 \
+            ${{ env.IMAGE_NAME }}
+
+      - name: Wait for healthy status
+        run: timeout 60 bash -c 'until [ "$(docker inspect -f {{.State.Health.Status}} ${{ env.CONTAINER_NAME }})" == "healthy" ]; do sleep 1; done'
+
+      - name: Test admin login
+        run: |
+          docker exec ${{ env.CONTAINER_NAME }} ldapsearch -x -LLL \
+            -D "cn=admin,dc=example,dc=com" \
+            -w admin123 \
+            -b "dc=example,dc=com" \
+            "(objectClass=organizationalUnit)" dn
+
+      - name: Show logs on failure
+        if: failure()
+        run: docker logs ${{ env.CONTAINER_NAME }}
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f ${{ env.CONTAINER_NAME }} || true
+
+  test-readonly-acl:
+    name: Readonly User ACL
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+
+      - name: Load Docker image
+        run: docker load < image.tar.gz
+
+      - name: Start container
+        run: |
+          docker run -d --name ${{ env.CONTAINER_NAME }} \
+            -e LDAP_DOMAIN=example.com \
+            -e LDAP_ORGANIZATION="Test Org" \
+            -e LDAP_ADMIN_PASSWORD=admin123 \
+            -e LDAP_READONLY_USER=true \
+            -e LDAP_READONLY_USER_PASSWORD=readonly123 \
+            --health-cmd='/usr/local/bin/healthcheck.sh' \
+            --health-interval=2s \
+            --health-timeout=5s \
+            --health-retries=30 \
+            ${{ env.IMAGE_NAME }}
+
+      - name: Wait for healthy status
+        run: timeout 60 bash -c 'until [ "$(docker inspect -f {{.State.Health.Status}} ${{ env.CONTAINER_NAME }})" == "healthy" ]; do sleep 1; done'
+
+      - name: Test readonly user can read
+        run: |
+          docker exec ${{ env.CONTAINER_NAME }} ldapsearch -x -LLL \
+            -D "cn=readonly,dc=example,dc=com" \
+            -w readonly123 \
+            -b "dc=example,dc=com" \
+            "(objectClass=organizationalUnit)" dn
+
+      - name: Test readonly user cannot write
+        run: |
+          if docker exec -i ${{ env.CONTAINER_NAME }} ldapadd -x \
+            -D "cn=readonly,dc=example,dc=com" \
+            -w readonly123 2>&1 <<EOF | grep -Eq "Insufficient access|insufficientAccessRights|\(50\)"
+          dn: uid=test,ou=people,dc=example,dc=com
+          objectClass: inetOrgPerson
+          uid: test
+          cn: Test
+          sn: User
+          EOF
+          then
+            echo "✓ Readonly user correctly denied write access"
+          else
+            echo "✗ Readonly user should not have write access"
+            exit 1
+          fi
+
+      - name: Show logs on failure
+        if: failure()
+        run: docker logs ${{ env.CONTAINER_NAME }}
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f ${{ env.CONTAINER_NAME }} || true
+
+  test-memberof:
+    name: MemberOf Overlay
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+
+      - name: Load Docker image
+        run: docker load < image.tar.gz
+
+      - name: Start container
+        run: |
+          docker run -d --name ${{ env.CONTAINER_NAME }} \
+            -e LDAP_DOMAIN=example.com \
+            -e LDAP_ORGANIZATION="Test Org" \
+            -e LDAP_ADMIN_PASSWORD=admin123 \
+            -e LDAP_ENABLE_MEMBEROF=true \
+            --health-cmd='/usr/local/bin/healthcheck.sh' \
+            --health-interval=2s \
+            --health-timeout=5s \
+            --health-retries=30 \
+            ${{ env.IMAGE_NAME }}
+
+      - name: Wait for healthy status
+        run: timeout 60 bash -c 'until [ "$(docker inspect -f {{.State.Health.Status}} ${{ env.CONTAINER_NAME }})" == "healthy" ]; do sleep 1; done'
+
+      - name: Add test user
+        run: |
+          docker exec -i ${{ env.CONTAINER_NAME }} ldapadd -x \
+            -D "cn=admin,dc=example,dc=com" \
+            -w admin123 <<EOF
+          dn: uid=testuser,ou=people,dc=example,dc=com
+          objectClass: top
+          objectClass: person
+          objectClass: organizationalPerson
+          objectClass: inetOrgPerson
+          uid: testuser
+          cn: Test User
+          sn: User
+          mail: test@example.com
+          EOF
+
+      - name: Create test group
+        run: |
+          docker exec -i ${{ env.CONTAINER_NAME }} ldapadd -x \
+            -D "cn=admin,dc=example,dc=com" \
+            -w admin123 <<EOF
+          dn: cn=developers,ou=groups,dc=example,dc=com
+          objectClass: top
+          objectClass: groupOfNames
+          cn: developers
+          description: Development team
+          member: cn=admin,dc=example,dc=com
+          EOF
+
+      - name: Add user to group
+        run: |
+          docker exec -i ${{ env.CONTAINER_NAME }} ldapmodify -x \
+            -D "cn=admin,dc=example,dc=com" \
+            -w admin123 <<EOF
+          dn: cn=developers,ou=groups,dc=example,dc=com
+          changetype: modify
+          add: member
+          member: uid=testuser,ou=people,dc=example,dc=com
+          EOF
+
+      - name: Verify memberOf attribute exists
+        run: |
+          RESULT=$(docker exec ${{ env.CONTAINER_NAME }} ldapsearch -x -LLL \
+            -D "cn=admin,dc=example,dc=com" \
+            -w admin123 \
+            -b "uid=testuser,ou=people,dc=example,dc=com" \
+            "(objectClass=*)" memberOf 2>/dev/null)
+          
+          if echo "$RESULT" | grep -q "memberOf: cn=developers,ou=groups,dc=example,dc=com"; then
+            echo "✓ memberOf attribute correctly set"
+          else
+            echo "✗ memberOf attribute not found"
+            echo "$RESULT"
+            exit 1
+          fi
+
+      - name: Remove user from group
+        run: |
+          docker exec -i ${{ env.CONTAINER_NAME }} ldapmodify -x \
+            -D "cn=admin,dc=example,dc=com" \
+            -w admin123 <<EOF
+          dn: cn=developers,ou=groups,dc=example,dc=com
+          changetype: modify
+          delete: member
+          member: uid=testuser,ou=people,dc=example,dc=com
+          EOF
+
+      - name: Verify memberOf attribute removed
+        run: |
+          RESULT=$(docker exec ${{ env.CONTAINER_NAME }} ldapsearch -x -LLL \
+            -D "cn=admin,dc=example,dc=com" \
+            -w admin123 \
+            -b "uid=testuser,ou=people,dc=example,dc=com" \
+            "(objectClass=*)" memberOf 2>/dev/null || true)
+          
+          if echo "$RESULT" | grep -q "memberOf:"; then
+            echo "✗ memberOf attribute should have been removed"
+            exit 1
+          else
+            echo "✓ memberOf attribute correctly removed"
+          fi
+
+      - name: Show logs on failure
+        if: failure()
+        run: docker logs ${{ env.CONTAINER_NAME }}
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f ${{ env.CONTAINER_NAME }} || true
+
+  test-bootstrap-ldif:
+    name: Bootstrap LDIF
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+
+      - name: Load Docker image
+        run: docker load < image.tar.gz
+
+      - name: Check if bootstrap LDIF exists
+        run: |
+          if [ -d "image/bootstrap/ldif" ]; then
+            echo "✓ Bootstrap LDIF directory exists"
+            ls -la image/bootstrap/ldif/
+          else
+            echo "✗ Bootstrap LDIF directory not found"
+            echo "Repository structure:"
+            find . -type d -name "bootstrap" 2>/dev/null || true
+            exit 1
+          fi
+
+      - name: Show bootstrap LDIF content
+        run: |
+          echo "=== Bootstrap LDIF files ==="
+          for file in image/bootstrap/ldif/*.ldif; do
+            if [ -f "$file" ]; then
+              echo "--- $file ---"
+              cat "$file"
+            fi
+          done
+
+      - name: Start container with bootstrap volume
+        run: |
+          docker run -d --name ${{ env.CONTAINER_NAME }} \
+            -e LDAP_DOMAIN=example.com \
+            -e LDAP_ORGANIZATION="Test Org" \
+            -e LDAP_ADMIN_PASSWORD=admin123 \
+            -v "${{ github.workspace }}/image/bootstrap/ldif:/bootstrap/ldif:ro" \
+            --health-cmd='/usr/local/bin/healthcheck.sh' \
+            --health-interval=2s \
+            --health-timeout=5s \
+            --health-retries=30 \
+            ${{ env.IMAGE_NAME }}
+
+      - name: Wait for healthy status
+        run: timeout 60 bash -c 'until [ "$(docker inspect -f {{.State.Health.Status}} ${{ env.CONTAINER_NAME }})" == "healthy" ]; do sleep 1; done'
+
+      - name: List all entries in database
+        run: |
+          echo "=== All entries in database ==="
+          docker exec ${{ env.CONTAINER_NAME }} ldapsearch -x -LLL \
+            -D "cn=admin,dc=example,dc=com" \
+            -w admin123 \
+            -b "dc=example,dc=com" \
+            "(objectClass=*)" dn || true
+
+      - name: Verify LDIF user exists
+        run: |
+          docker exec ${{ env.CONTAINER_NAME }} ldapsearch -x -LLL \
+            -D "cn=admin,dc=example,dc=com" \
+            -w admin123 \
+            -b "uid=john,ou=people,dc=example,dc=com" \
+            "(objectClass=*)" dn
+
+      - name: Verify LDIF group membership
+        run: |
+          RESULT=$(docker exec ${{ env.CONTAINER_NAME }} ldapsearch -x -LLL \
+            -D "cn=admin,dc=example,dc=com" \
+            -w admin123 \
+            -b "cn=developers,ou=groups,dc=example,dc=com" \
+            "(objectClass=*)" member 2>/dev/null)
+          
+          if echo "$RESULT" | grep -q "uid=john,ou=people,dc=example,dc=com"; then
+            echo "✓ LDIF group contains john"
+          else
+            echo "✗ LDIF group missing john"
+            echo "$RESULT"
+            exit 1
+          fi
+
+      - name: Show logs on failure
+        if: failure()
+        run: docker logs ${{ env.CONTAINER_NAME }}
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f ${{ env.CONTAINER_NAME }} || true
+
+  test-tls-auto:
+    name: TLS Auto Mode (Self-signed)
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+
+      - name: Load Docker image
+        run: docker load < image.tar.gz
+
+      - name: Generate self-signed certificate
+        run: |
+          mkdir -p tls-certs
+          openssl req -x509 -nodes -newkey rsa:2048 \
+            -keyout tls-certs/server.key \
+            -out tls-certs/server.crt \
+            -days 1 -subj "/CN=localhost"
+          cp tls-certs/server.crt tls-certs/ca.crt
+          chmod 644 tls-certs/*
+
+      - name: Start TLS-enabled container
+        run: |
+          docker run -d --name ${{ env.CONTAINER_NAME }} \
+            -e LDAP_DOMAIN=example.com \
+            -e LDAP_ORGANIZATION="Test Org" \
+            -e LDAP_ADMIN_PASSWORD=admin123 \
+            -e LDAP_TLS_ENABLED=true \
+            -e LDAP_REQUIRE_TLS=false \
+            -v "$(pwd)/tls-certs/server.crt:/run/secrets/ldap/server.crt:ro" \
+            -v "$(pwd)/tls-certs/server.key:/run/secrets/ldap/server.key:ro" \
+            -v "$(pwd)/tls-certs/ca.crt:/run/secrets/ldap/ca.crt:ro" \
+            --health-cmd='LDAPTLS_CACERT=/run/secrets/ldap/ca.crt LDAPTLS_REQCERT=allow \
+              ldapsearch -x -LLL -ZZ -H ldap://localhost:389 \
+              -D "cn=admin,dc=example,dc=com" -w admin123 \
+              -b "dc=example,dc=com" "(objectClass=organization)" dn >/dev/null 2>&1' \
+            --health-start-period=20s \
+            --health-interval=2s \
+            --health-timeout=5s \
+            --health-retries=30 \
+            ${{ env.IMAGE_NAME }}
+
+      - name: Wait for healthy status
+        run: timeout 60 bash -c 'until [ "$(docker inspect -f {{.State.Health.Status}} ${{ env.CONTAINER_NAME }})" == "healthy" ]; do sleep 1; done'
+
+      - name: Test LDAPS (port 636)
+        run: |
+          docker exec ${{ env.CONTAINER_NAME }} \
+            env LDAPTLS_CACERT=/run/secrets/ldap/ca.crt LDAPTLS_REQCERT=allow \
+            ldapsearch -x -LLL -H ldaps://localhost:636 \
+            -D "cn=admin,dc=example,dc=com" \
+            -w admin123 \
+            -b "dc=example,dc=com" \
+            "(objectClass=organization)" dn
+
+      - name: Test StartTLS
+        run: |
+          docker exec ${{ env.CONTAINER_NAME }} \
+            env LDAPTLS_CACERT=/run/secrets/ldap/ca.crt LDAPTLS_REQCERT=allow \
+            ldapsearch -x -LLL -ZZ -H ldap://localhost:389 \
+            -D "cn=admin,dc=example,dc=com" \
+            -w admin123 \
+            -b "dc=example,dc=com" \
+            "(objectClass=organization)" dn
+
+      - name: Show logs on failure
+        if: failure()
+        run: docker logs ${{ env.CONTAINER_NAME }}
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f ${{ env.CONTAINER_NAME }} || true
+
+  test-tls-required:
+    name: TLS Required Mode
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+
+      - name: Load Docker image
+        run: docker load < image.tar.gz
+
+      - name: Generate self-signed certificate
+        run: |
+          mkdir -p tls-certs
+          openssl req -x509 -nodes -newkey rsa:2048 \
+            -keyout tls-certs/server.key \
+            -out tls-certs/server.crt \
+            -days 1 -subj "/CN=localhost"
+          cp tls-certs/server.crt tls-certs/ca.crt
+          chmod 644 tls-certs/*
+
+      - name: Start TLS-required container
+        run: |
+          docker run -d --name ${{ env.CONTAINER_NAME }} \
+            -e LDAP_DOMAIN=example.com \
+            -e LDAP_ORGANIZATION="Test Org" \
+            -e LDAP_ADMIN_PASSWORD=admin123 \
+            -e LDAP_TLS_ENABLED=true \
+            -e LDAP_REQUIRE_TLS=true \
+            -v "$(pwd)/tls-certs/server.crt:/run/secrets/ldap/server.crt:ro" \
+            -v "$(pwd)/tls-certs/server.key:/run/secrets/ldap/server.key:ro" \
+            -v "$(pwd)/tls-certs/ca.crt:/run/secrets/ldap/ca.crt:ro" \
+            --health-cmd='LDAPTLS_CACERT=/run/secrets/ldap/ca.crt LDAPTLS_REQCERT=allow \
+              ldapsearch -x -LLL -ZZ -H ldap://localhost:389 \
+              -D "cn=admin,dc=example,dc=com" -w admin123 \
+              -b "dc=example,dc=com" "(objectClass=organization)" dn >/dev/null 2>&1' \
+            --health-start-period=20s \
+            --health-interval=2s \
+            --health-timeout=5s \
+            --health-retries=30 \
+            ${{ env.IMAGE_NAME }}
+
+      - name: Check listening ports (debug)
+        run: docker exec ${{ env.CONTAINER_NAME }} sh -lc 'ss -lntp | grep -E ":(389|636)\b" || true'
+
+      - name: Wait for healthy status
+        run: timeout 60 bash -c 'until [ "$(docker inspect -f {{.State.Health.Status}} ${{ env.CONTAINER_NAME }})" == "healthy" ]; do sleep 1; done'
+
+      - name: Verify plain LDAP is rejected
+        run: |
+          if docker exec ${{ env.CONTAINER_NAME }} \
+            ldapsearch -x -LLL -H ldap://localhost:389 \
+            -D "cn=admin,dc=example,dc=com" \
+            -w admin123 \
+            -b "dc=example,dc=com" \
+            "(objectClass=organization)" dn 2>&1; then
+            echo "✗ Plain LDAP unexpectedly succeeded"
+            exit 1
+          else
+            echo "✓ Plain LDAP is blocked as expected"
+          fi
+
+      - name: Verify StartTLS succeeds
+        run: |
+          docker exec ${{ env.CONTAINER_NAME }} \
+            env LDAPTLS_CACERT=/run/secrets/ldap/ca.crt LDAPTLS_REQCERT=allow \
+            ldapsearch -x -LLL -ZZ -H ldap://localhost:389 \
+            -D "cn=admin,dc=example,dc=com" \
+            -w admin123 \
+            -b "dc=example,dc=com" \
+            "(objectClass=organization)" dn
+
+      - name: Show logs on failure
+        if: failure()
+        run: docker logs ${{ env.CONTAINER_NAME }}
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f ${{ env.CONTAINER_NAME }} || true
+
+  test-tls-failure:
+    name: TLS Without Certs (Expected Failure)
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+
+      - name: Load Docker image
+        run: docker load < image.tar.gz
+
+      - name: Verify container fails without certs
+        run: |
+          set +e
+          timeout 10 docker run --rm --name ${{ env.CONTAINER_NAME }} \
+            -e LDAP_DOMAIN=example.com \
+            -e LDAP_ORGANIZATION="Test Org" \
+            -e LDAP_ADMIN_PASSWORD=admin123 \
+            -e LDAP_TLS_ENABLED=true \
+            ${{ env.IMAGE_NAME }};
+          code=$?
+          set -e
+
+          if [ $code -eq 124 ]; then
+            echo "✗ Container stayed running (started) but should have failed without certs"
+            exit 1
+          elif [ $code -eq 0 ]; then
+            echo "✗ Container exited 0 (unexpected)"
+            exit 1
+          else
+            echo "✓ Container failed as expected without TLS certs"
+          fi
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f ${{ env.CONTAINER_NAME }} 2>/dev/null || true

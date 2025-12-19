@@ -1,0 +1,24 @@
+# Example: add a group
+dn: cn=developers,ou=groups,dc=example,dc=com
+objectClass: top
+objectClass: groupOfNames
+cn: developers
+member: cn=admin,dc=example,dc=com
+
+# Example: add a user
+dn: uid=john,ou=people,dc=example,dc=com
+objectClass: top
+objectClass: person
+objectClass: organizationalPerson
+objectClass: inetOrgPerson
+uid: john
+cn: John Doe
+sn: Doe
+mail: john@example.com
+userPassword: {SSHA}hashed_password_here
+
+# Add user to group
+dn: cn=developers,ou=groups,dc=example,dc=com
+changetype: modify
+add: member
+member: uid=john,ou=people,dc=example,dc=com

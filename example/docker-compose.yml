@@ -1,0 +1,32 @@
+services:
+  openldap:
+    build:
+      context: ../image
+      dockerfile: Dockerfile
+    container_name: openldap
+    environment:
+      LDAP_DOMAIN: example.com
+      LDAP_ORGANIZATION: Example Org
+      # DO NOT USE IN PRODUCTION! Use .env file or Docker secrets instead.
+      # See https://docs.docker.com/compose/environment-variables/
+      LDAP_ADMIN_PASSWORD: "change-me-now"
+      # Optional:
+      # LDAP_BASE_DN: "dc=example,dc=com"
+      # LDAP_TLS_ENABLED: "auto"   # auto|true|false
+      # LDAP_REQUIRE_TLS: "false"
+    volumes:
+      - openldap_data:/var/lib/ldap
+      - openldap_config:/etc/ldap/slapd.d
+      - ./bootstrap/ldif:/bootstrap/ldif:ro
+      - ./backup:/backup
+      # TLS (optional; use Docker secrets in real deployments)
+      # - ./tls/server.crt:/run/secrets/ldap/server.crt:ro
+      # - ./tls/server.key:/run/secrets/ldap/server.key:ro
+      # - ./tls/ca.crt:/run/secrets/ldap/ca.crt:ro
+    ports:
+      - "389:389"
+      - "636:636"
+
+volumes:
+  openldap_data:
+  openldap_config:
