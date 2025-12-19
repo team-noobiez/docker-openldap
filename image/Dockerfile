@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 #
 # SPDX-FileCopyrightText: © Team Noobiez
-# SPDX-License-Identifier: Apache-2.0 or MIT
+# SPDX-License-Identifier: Apache-2.0
 # SPDX-ArtifactOfProjectHomePage: https://github.com/team-noobiez/docker-openldap
 #
 # References:
