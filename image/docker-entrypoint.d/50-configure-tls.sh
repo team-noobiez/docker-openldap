@@ -26,6 +26,26 @@ configure_tls() {
     die "TLS enabled but cert/key missing: ${LDAP_TLS_CRT_FILE} / ${LDAP_TLS_KEY_FILE}"
   fi
 
+  log "Preparing TLS certificates with secure permissions..."
+
+  mkdir -p /etc/ldap/ssl
+  chmod 700 /etc/ldap/ssl
+  install -d -o root -g openldap -m 0750 /etc/ldap/ssl
+
+  cp "${LDAP_TLS_CRT_FILE}" /etc/ldap/ssl/cert.crt
+  cp "${LDAP_TLS_KEY_FILE}" /etc/ldap/ssl/cert.key
+  if [[ -r "${LDAP_TLS_CA_FILE:-}" ]]; then
+    cp "${LDAP_TLS_CA_FILE}" /etc/ldap/ssl/ca.crt
+    chown openldap:openldap /etc/ldap/ssl/ca.crt
+    LDAP_TLS_CA_FILE=/etc/ldap/ssl/ca.crt
+  fi
+
+  chown openldap:openldap /etc/ldap/ssl/cert.crt /etc/ldap/ssl/cert.key
+  chmod 600 /etc/ldap/ssl/cert.key
+
+  LDAP_TLS_CRT_FILE=/etc/ldap/ssl/cert.crt
+  LDAP_TLS_KEY_FILE=/etc/ldap/ssl/cert.key
+
   log "Applying TLS settings to cn=config..."
 
   # Start slapd temporarily on ldapi to modify cn=config safely
