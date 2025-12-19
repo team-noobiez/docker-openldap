@@ -76,10 +76,11 @@ The script rebuilds the image and runs several scenarios:
 
 All helper containers are cleaned up automatically at the end of the run.
 
+GitHub Actions (`.github/workflows/ci.yml`) runs the same matrix on every push and pull request: the image is built once, saved as an artifact, and each job loads it to execute the smoke, readonly ACL, memberOf, bootstrap LDIF, TLS auto, TLS required, and TLS failure checks above.
+
 ## Roadmap (next steps)
 
 - `_FILE` support for more secrets (bind users, replication creds)
 - Overlays toggles (`memberof`, `ppolicy`, `syncprov`)
 - Scheduled backups via `slapcat` (optional, opt-in)
-- GitHub Actions CI: build + run + ldapsearch assertions
 - Kubernetes manifests + Helm chart

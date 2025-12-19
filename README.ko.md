@@ -80,10 +80,11 @@ bash test.sh
 
 테스트 종료 시 사용된 헬퍼 컨테이너들은 자동으로 삭제됩니다.
 
+GitHub Actions(`.github/workflows/ci.yml`) 으로 모든 push / PR 이벤트마다 동일한 시나리오를 실행합니다. 이미지를 한 번 빌드해 아티팩트로 저장한 뒤, 각 잡이 이를 불러 스모크, readonly ACL, memberOf, bootstrap LDIF, TLS 자동/강제/실패 케이스를 검증합니다.
+
 ## 로드맵 (next steps)
 
 - 더 많은 비밀 정보(바인드 사용자, 복제 자격 증명 등)에 대해 `_FILE` 방식 지원
 - 오버레이 토글 기능 (`memberof`, `ppolicy`, `syncprov`)
 - `slapcat` 을 이용한 예약 백업 기능
-- GitHub Actions CI: 빌드 + 실행 + `ldapsearch` 검증
 - Kubernetes 매니페스트 및 Helm 차트 제공
